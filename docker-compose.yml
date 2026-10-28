@@ -1,0 +1,113 @@
+version: '3.8'
+
+services:
+  # 1. Primary PostgreSQL Relational / Historical Store
+  postgres:
+    image: postgres:16-alpine
+    container_name: telecompulse-postgres
+    environment:
+      POSTGRES_DB: telecompulse
+      POSTGRES_USER: telecom_admin
+      POSTGRES_PASSWORD: telecom_secure_password
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U telecom_admin -d telecompulse"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # 2. Apache Kafka ZooKeeper Coordinator
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.0
+    container_name: telecompulse-zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    ports:
+      - "2181:2181"
+
+  # 3. Apache Kafka Distributed Message Broker
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: telecompulse-kafka
+    depends_on:
+      - zookeeper
+    ports:
+      - "9092:9092"
+      - "29092:29092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+
+  # 4. Apache Spark Distributed Processing Cluster - Master
+  spark-master:
+    image: bitnami/spark:3.5.0
+    container_name: telecompulse-spark-master
+    environment:
+      - SPARK_MODE=master
+      - SPARK_RPC_AUTHENTICATION_ENABLED=no
+      - SPARK_RPC_ENCRYPTION_ENABLED=no
+      - SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED=no
+      - SPARK_SSL_ENABLED=no
+    ports:
+      - "8080:8080"
+      - "7077:7077"
+
+  # 5. Apache Spark Worker
+  spark-worker:
+    image: bitnami/spark:3.5.0
+    container_name: telecompulse-spark-worker
+    depends_on:
+      - spark-master
+    environment:
+      - SPARK_MODE=worker
+      - SPARK_MASTER_URL=spark://spark-master:7077
+      - SPARK_WORKER_MEMORY=1G
+      - SPARK_WORKER_CORES=2
+      - SPARK_RPC_AUTHENTICATION_ENABLED=no
+      - SPARK_RPC_ENCRYPTION_ENABLED=no
+      - SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED=no
+      - SPARK_SSL_ENABLED=no
+
+  # 6. TelecomPulse AI Backend
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    container_name: telecompulse-backend
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_started
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: postgresql://telecom_admin:telecom_secure_password@postgres:5432/telecompulse
+      STREAMING_MODE: KAFKA_SPARK
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      SPARK_MASTER: spark://spark-master:7077
+    restart: unless-stopped
+
+  # 7. TelecomPulse AI Frontend
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+    container_name: telecompulse-frontend
+    depends_on:
+      - backend
+    ports:
+      - "3000:80"
+    restart: unless-stopped
+
+volumes:
+  pgdata:
